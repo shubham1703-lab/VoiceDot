@@ -1,0 +1,1201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mobile PDF Voice Commenter</title>
+<script>
+  // Define a global process object to prevent ReferenceError in Floating UI
+  // This is a common workaround for modules that expect Node.js 'process' in a browser environment.
+  window.process = window.process || { env: { NODE_ENV: 'production' } };
+</script>
+<script type="importmap">
+  {
+    "imports": {
+      "@floating-ui/core": "https://cdn.jsdelivr.net/npm/@floating-ui/core@1.2.1/dist/floating-ui.core.esm.js",
+      "@floating-ui/dom": "https://cdn.jsdelivr.net/npm/@floating-ui/dom@1.6.0/dist/floating-ui.dom.esm.js",
+      "@floating-ui/utils": "https://cdn.jsdelivr.net/npm/@floating-ui/utils@0.2.1/dist/floating-ui.utils.esm.js",
+      "@floating-ui/utils/dom": "https://cdn.jsdelivr.net/npm/@floating-ui/utils@0.2.1/dist/floating-ui.utils.dom.esm.js"
+    }
+  }
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.10.111/pdf.min.js"></script>
+<script>
+  pdfjsLib.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.10.111/pdf.worker.min.js";
+</script>
+<script src="https://cdn.jsdelivr.net/npm/spark-md5@3.0.2/spark-md5.min.js"></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>ECHO-NOTE</h1>
+<div id="voiceStatus" style="text-align: center; margin-top: 10px; font-weight: bold;"></div>
+
+<div class="pdf-controls">
+ <button id="load-demo-btn">Load Demo PDF</button>
+ <button id="switch-pdf-btn">Upload PDF</button>
+ <input type="file" id="file-input" accept="application/pdf" style="display:none">
+ <p>
+   <input type="text" id="pdfUrlInput" placeholder="Enter PDF URL..." >
+   <button id="loadUrlBtn">Load from URL</button>
+ </p>
+ <div class="zoom-controls">
+   <button id="zoom-in-btn">+</button>
+   <button id="zoom-out-btn">-</button>
+ </div>
+</div>
+
+<div class="container">
+  <div id="pdf-container"></div>
+</div>
+
+<!-- Floating Comments Drawer -->
+<div id="comments-drawer" class="comments-drawer">
+  <div class="drawer-header">
+    <h3>COMMENTS</h3>
+    <button id="close-drawer-btn" class="close-button">&times;</button>
+  </div>
+  <div class="drawer-content">
+    <button id="reset-btn">Reset Comments</button>
+    <button id="download-csv-btn">Download CSV</button>
+    <div id="comment-list-container"></div>
+  </div>
+</div>
+
+<!-- Floating Comments Toggle Button -->
+<button id="toggle-drawer-btn" class="toggle-drawer-button">
+  <svg class="comment-bubble-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="24px" height="24px">
+    <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/>
+  </svg>
+</button>
+
+<script type="module">
+import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2";
+env.useBrowserCache = true; env.allowLocalModels = false;
+env.backends.onnx.wasm.wasmPaths="https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/";
+
+import { computePosition, offset, flip, shift, autoUpdate } from "@floating-ui/dom";
+
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js";
+import { getFirestore, collection, addDoc, getDocs, query, where, deleteDoc, doc, updateDoc } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js";
+
+// ✅ Firebase config
+const firebaseConfig = {
+  apiKey: "AIzaSyAO0yRhSOgPx7YSXxwml-hKE2401zY68ZU",
+  authDomain: "mobile-58334.firebaseapp.com",
+  projectId: "mobile-58334",
+  storageBucket: "mobile-58334.firebasestorage.app",
+  messagingSenderId: "428528137397",
+  appId: "1:428528137397:web:f245cbc7ff9032b109bafc",
+  measurementId: "G-GDVXS0YQBB"
+};
+
+// ✅ Initialize Firebase + Firestore
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+console.log("✅ Firebase connected");
+
+// ---------------------------
+// 🧩 Firestore Helper Functions
+// ---------------------------
+
+// Save comment
+window.saveComment = async function(commentObj) {
+  try {
+    const docRef = await addDoc(collection(db, "comments"), commentObj);
+    console.log("💾 Comment saved with ID:", docRef.id);
+    return docRef; // Return the docRef for the new comment
+  } catch (e) {
+    console.error("❌ Error adding comment:", e);
+  }
+}
+
+// Update comment
+window.updateComment = async function(commentId, newText) {
+  try {
+    const commentRef = doc(db, "comments", commentId);
+    await updateDoc(commentRef, { text: newText });
+    console.log("✏️ Comment updated with ID:", commentId);
+  } catch (e) {
+    console.error("❌ Error updating comment:", e);
+  }
+}
+
+// Delete single comment
+window.deleteCommentById = async function(commentId) {
+  try {
+    await deleteDoc(doc(db, "comments", commentId));
+    console.log("🗑️ Comment deleted with ID:", commentId);
+  } catch (e) {
+    console.error("❌ Error deleting comment:", e);
+  }
+}
+
+// Load all comments for a specific PDF
+window.loadComments = async function(pdfKey) {
+  console.log("Attempting to load comments for pdfKey:", pdfKey);
+  try {
+    const commentsCollection = collection(db, "comments");
+    const q = query(commentsCollection, where("pdfKey", "==", pdfKey));
+    const querySnapshot = await getDocs(q);
+    const allComments = [];
+    querySnapshot.forEach((doc) => allComments.push({ id: doc.id, ...doc.data() })); // Include doc.id
+    console.log("📥 Loaded comments for pdfKey", pdfKey, ":", allComments);
+    return allComments;
+  } catch (e) {
+    console.error("❌ Error loading comments for pdfKey", pdfKey, ":", e);
+    return [];
+  }
+}
+
+// Delete all comments for a specific PDF
+window.deleteAllCommentsByPdfKey = async function(pdfKey) {
+  try {
+    console.log(`Attempting to delete comments for pdfKey: "${pdfKey}"`);
+    const commentsCollection = collection(db, "comments");
+    const q = query(commentsCollection, where("pdfKey", "==", pdfKey));
+    const querySnapshot = await getDocs(q);
+    const deletePromises = [];
+    let deletedCount = 0;
+    querySnapshot.forEach((doc) => {
+      deletePromises.push(deleteDoc(doc.ref));
+      deletedCount++;
+    });
+    await Promise.all(deletePromises);
+    console.log(`🗑️ Successfully deleted ${deletedCount} comments for pdfKey: "${pdfKey}" from Firestore.`);
+  } catch (e) {
+    console.error("❌ Error deleting comments:", e);
+  }
+}
+
+// Edit comment function
+async function editComment(commentId, currentText) {
+  const newText = prompt("Edit your comment:", currentText);
+  if (newText !== null && newText.trim() !== "") {
+    await window.updateComment(commentId, newText.trim());
+    // Update the comment in the local 'comments' array
+    const commentIndex = comments.findIndex(c => c.id === commentId);
+    if (commentIndex !== -1) {
+      comments[commentIndex].text = newText.trim();
+    }
+    renderCommentsSidebar();
+    // Re-render all PDF pages to update the comment icons
+    if (pdfDoc) {
+      renderPDF();
+    }
+  }
+}
+
+// Delete comment function
+async function deleteComment(commentId) {
+  if (confirm("Are you sure you want to delete this comment?")) {
+    await window.deleteCommentById(commentId);
+    // Remove the comment from the local 'comments' array
+    comments = comments.filter(c => c.id !== commentId);
+    renderCommentsSidebar();
+    // Re-render all PDF pages to remove the comment icon
+    if (pdfDoc) {
+      renderPDF();
+    }
+  }
+}
+
+// Function to compute MD5 hash of an ArrayBuffer
+async function computeMD5(buffer) {
+  const spark = new SparkMD5.ArrayBuffer();
+  spark.append(buffer);
+  const hash = spark.end();
+  console.log("🔑 Computed MD5 hash (pdfKey):", hash);
+  return hash;
+}
+
+const fileInput = document.getElementById("file-input");
+const pdfContainer = document.getElementById("pdf-container");
+const commentListContainer = document.getElementById("comment-list-container");
+const resetBtn = document.getElementById("reset-btn");
+const voiceStatus = document.getElementById("voiceStatus");
+const commentsDrawer = document.getElementById("comments-drawer");
+const toggleDrawerBtn = document.getElementById("toggle-drawer-btn");
+const closeDrawerBtn = document.getElementById("close-drawer-btn");
+
+let pdfDoc = null, comments = [], pdfKey = "";
+let currentCommentLayer = null, lastClickPosition = {x:0, y:0};
+let mediaRecorder = null, audioChunks = [], recording = false;
+let transcriber = null, floatingUI = null, cleanupFloatingUI = null;
+let currentScale = 1.0;
+let recordToggleBtn = null; // New global variable for the record button
+let currentStream = null; // To store the audio stream
+let audioSourceNode = null; // To store the AudioWorkletNode for the microphone
+let isDrawerOpen = false; // Track drawer state
+const downloadCsvBtn = document.getElementById("download-csv-btn");
+let isScrolling = false; // Flag to differentiate between scroll and tap
+let touchStartTime = 0; // To track touch duration for long press
+let LONG_PRESS_DELAY = 500; // Milliseconds for a long press
+let longPressTimer = null; // Timer for long press
+const ZOOM_STEP = 0.2; // How much to zoom in/out with each button click
+const MIN_SCALE = 0.5;
+const MAX_SCALE = 3.0;
+let initialPinchDistance = 0;
+let initialScale = 1.0;
+
+// Function to request and store microphone permission/stream
+async function setupMicrophone() {
+  if (currentStream) {
+    console.log("Microphone stream already active.");
+    return true;
+  }
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    updateVoiceStatus("Voice recording is not supported on this device or browser.", VOICE_STATUS_CLASSES.ERROR);
+    console.warn("Voice recording not supported: navigator.mediaDevices.getUserMedia is not available.");
+    if (recordToggleBtn) {
+      recordToggleBtn.disabled = true;
+      recordToggleBtn.style.opacity = 0.5;
+    }
+    return false;
+  }
+
+  try {
+    updateVoiceStatus("Requesting microphone access...", VOICE_STATUS_CLASSES.LOADING);
+    currentStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    console.log("Microphone access granted and stream obtained.");
+    updateVoiceStatus(VOICE_STATUS_MESSAGES.WHISPER_READY, VOICE_STATUS_CLASSES.READY);
+    return true;
+  } catch (err) {
+    updateVoiceStatus(VOICE_STATUS_MESSAGES.ERROR + "Microphone access denied: " + err.message, VOICE_STATUS_CLASSES.ERROR);
+    console.error("Error getting microphone access:", err);
+    if (recordToggleBtn) {
+      recordToggleBtn.disabled = true;
+      recordToggleBtn.style.opacity = 0.5;
+    }
+    return false;
+  }
+}
+
+function getResponsiveScale() {
+  const screenWidth = window.innerWidth;
+  let scale = 1.0; // Default scale
+
+  if (screenWidth < 400) {
+    scale = 1.0; // Base scale for very small screens
+  } else if (screenWidth < 768) {
+    scale = 1.2; // Base scale for tablets
+  } else {
+    scale = 1.5; // Base scale for larger screens
+  }
+
+  return scale;
+}
+
+function getLongPressDelay() {
+  const screenWidth = window.innerWidth;
+  if (screenWidth >= 768 && screenWidth <= 1024) { // Tablets
+    return 750; // Increased delay for tablets
+  }
+  return 500; // Default delay for other devices
+}
+
+// Constants for voice status messages and classes
+const VOICE_STATUS_MESSAGES = {
+  LOADING_MODEL: "Loading Whisper model...",
+  WHISPER_READY: "Whisper ready! Tap PDF to add a comment.",
+  RECORDING: "Recording...",
+  PROCESSING_AUDIO: "Processing audio...",
+  TRANSCRIBING: "Transcribing....",
+  ERROR: "Error: "
+};
+
+const VOICE_STATUS_CLASSES = {
+  LOADING: "status-loading",
+  READY: "status-ready",
+  RECORDING: "status-loading", // Can reuse loading style or create a new one
+  PROCESSING: "status-loading", // Can reuse loading style
+  TRANSCRIBING: "status-transcribing",
+  ERROR: "status-error"
+};
+
+// Helper function to update voice status
+function updateVoiceStatus(message, className = "") {
+  voiceStatus.textContent = message;
+  voiceStatus.className = ""; // Clear existing classes
+  if (className) {
+    voiceStatus.classList.add(className);
+  }
+}
+
+// Load Whisper
+(async ()=>{
+ updateVoiceStatus(VOICE_STATUS_MESSAGES.LOADING_MODEL, VOICE_STATUS_CLASSES.LOADING);
+ transcriber = await pipeline("automatic-speech-recognition", "Xenova/whisper-tiny.en", {
+   progress_callback: e => updateVoiceStatus(e.status, VOICE_STATUS_CLASSES.LOADING)
+ });
+ updateVoiceStatus(VOICE_STATUS_MESSAGES.WHISPER_READY, VOICE_STATUS_CLASSES.READY);
+})();
+
+// -------------------
+// PDF Rendering
+// -------------------
+async function renderPDF() {
+  console.log("renderPDF function called. Checking pdfDoc:", pdfDoc);
+  const container = document.getElementById("pdf-container");
+
+  // --- START: Floating UI state preservation ---
+  let wasFloatingUIOpen = false;
+  let floatingUIText = "";
+  let floatingUIPageNumber = -1;
+  let floatingUIRelativeX = -1; // Relative X on the page (0-100%)
+  let floatingUIRelativeY = -1; // Relative Y on the page (0-100%)
+
+  if (floatingUI && floatingUI.style.display !== "none" && currentCommentLayer) {
+    wasFloatingUIOpen = true;
+    const textarea = floatingUI.querySelector("textarea");
+    if (textarea) {
+      floatingUIText = textarea.value;
+    }
+    floatingUIPageNumber = parseInt(currentCommentLayer.closest(".page-wrapper").dataset.pageNumber);
+
+    // Calculate relative X, Y from lastClickPosition and currentCommentLayer
+    const rect = currentCommentLayer.getBoundingClientRect();
+    // lastClickPosition stores pageX, pageY. Need to convert to relative to the comment layer.
+    floatingUIRelativeX = ((lastClickPosition.x - rect.left) / rect.width) * 100;
+    floatingUIRelativeY = ((lastClickPosition.y - rect.top) / rect.height) * 100;
+
+    removeFloatingUI(); // Hide it before re-rendering
+  }
+  // --- END: Floating UI state preservation ---
+
+  // Save current scroll position
+  const scrollTop = container.scrollTop;
+  const scrollLeft = container.scrollLeft;
+
+  container.innerHTML = "";
+  if (!pdfDoc) {
+    console.warn("pdfDoc is null, cannot render PDF.");
+    return;
+  }
+
+  const dpr = window.devicePixelRatio || 1;
+
+  const renderPage = async (pageNum) => {
+    const page = await pdfDoc.getPage(pageNum);
+    const viewport = page.getViewport({ scale: currentScale }); // Use currentScale directly
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "page-wrapper";
+    wrapper.dataset.pageNumber = pageNum;
+    wrapper.style.position = "relative";
+
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+
+    canvas.width = viewport.width * dpr;
+    canvas.height = viewport.height * dpr;
+    canvas.style.width = viewport.width + "px";
+    canvas.style.height = viewport.height + "px";
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    await page.render({
+      canvasContext: ctx,
+      viewport
+    }).promise;
+
+    // comment layer
+    const commentLayer = document.createElement("div");
+    commentLayer.className = "comment-layer";
+    commentLayer.style.position = "absolute";
+    commentLayer.style.inset = "0";
+    // Use separate handlers for click and touch to differentiate
+    commentLayer.addEventListener("click", handleClick);
+    commentLayer.addEventListener("touchstart", handleTouchStart);
+    commentLayer.addEventListener("touchend", handleTouchEnd);
+    commentLayer.addEventListener("touchmove", handleTouchMove);
+    commentLayer.addEventListener("contextmenu", handleContextMenu); // For long press on non-touch devices
+
+    wrapper.appendChild(canvas);
+    wrapper.appendChild(commentLayer);
+
+    container.appendChild(wrapper);
+
+    renderCommentsOnPDF(pageNum, wrapper);
+  };
+
+  const pageRenderPromises = [];
+  for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+    pageRenderPromises.push(renderPage(pageNum));
+  }
+
+  await Promise.all(pageRenderPromises);
+
+  // Restore scroll position
+  container.scrollTop = scrollTop;
+  container.scrollLeft = scrollLeft;
+
+  console.log("Comments array before renderCommentsSidebar:", comments);
+  renderCommentsSidebar();
+  console.log("renderPDF function completed.");
+
+  // --- START: Floating UI state restoration ---
+  if (wasFloatingUIOpen && floatingUIPageNumber !== -1) {
+    const newPageWrapper = document.querySelector(`.page-wrapper[data-page-number="${floatingUIPageNumber}"]`);
+    if (newPageWrapper) {
+      const newCommentLayer = newPageWrapper.querySelector(".comment-layer");
+      if (newCommentLayer) {
+        const rect = newCommentLayer.getBoundingClientRect();
+        // Convert relative coordinates back to pageX, pageY for showFloatingUI
+        const newPageX = rect.left + (rect.width * floatingUIRelativeX / 100);
+        const newPageY = rect.top + (rect.height * floatingUIRelativeY / 100);
+
+        const newClientX = newPageX - window.scrollX;
+        const newClientY = newPageY - window.scrollY;
+
+        await showFloatingUI(newClientX, newClientY, newPageX, newPageY, newCommentLayer);
+        const textarea = floatingUI.querySelector("textarea");
+        if (textarea) {
+          textarea.value = floatingUIText;
+        }
+      }
+    }
+  }
+  // --- END: Floating UI state restoration ---
+}
+
+function toggleCommentsDrawer() {
+ isDrawerOpen = !isDrawerOpen;
+ commentsDrawer.classList.toggle("open", isDrawerOpen);
+ toggleDrawerBtn.classList.toggle("drawer-open", isDrawerOpen);
+ // Adjust main container margin to prevent content overlap
+ const container = document.querySelector(".container");
+ if (isDrawerOpen) {
+   container.classList.add("drawer-open-margin");
+ } else {
+   container.classList.remove("drawer-open-margin");
+ }
+}
+
+
+function renderCommentsOnPDF(pageNumber, pageWrapper){
+ const layer = pageWrapper.querySelector(".comment-layer");
+ layer.querySelectorAll(".comment-icon").forEach(e=>e.remove());
+ comments.filter(c=>c.pageNumber===pageNumber).forEach(c=>{
+   const div = document.createElement("div");
+   div.className="comment-icon";
+   div.style.left=c.x+"%";
+   div.style.top=c.y+"%";
+   div.textContent=c.text;
+   div.dataset.commentId = c.id; // Add comment ID to the icon
+   layer.appendChild(div);
+ });
+}
+
+function renderCommentsSidebar(){
+  console.log("renderCommentsSidebar called. Current comments:", comments);
+  commentListContainer.innerHTML="";
+  if (comments.length === 0) {
+    const noCommentsMessage = document.createElement("div");
+    noCommentsMessage.textContent = "No comments yet.";
+    noCommentsMessage.style.padding = "8px";
+    noCommentsMessage.style.textAlign = "center";
+    commentListContainer.appendChild(noCommentsMessage);
+  } else {
+    comments.sort((a,b)=>a.pageNumber-b.pageNumber || a.y-b.y).forEach(c=>{
+      const commentDiv = document.createElement("div");
+      commentDiv.className = "comment-item";
+      commentDiv.dataset.commentId = c.id;
+
+      const commentText = document.createElement("span");
+      commentText.textContent = "Page "+c.pageNumber+": "+c.text;
+      commentText.className = "comment-text";
+      commentDiv.appendChild(commentText);
+
+      const editBtn = document.createElement("button");
+      editBtn.className = "edit-comment-btn";
+      editBtn.textContent = "Edit";
+      editBtn.onclick = (event) => {
+        event.stopPropagation();
+        editComment(c.id, c.text);
+      };
+
+      const deleteBtn = document.createElement("button");
+      deleteBtn.className = "delete-comment-btn";
+      deleteBtn.textContent = "Delete";
+      deleteBtn.onclick = (event) => {
+        event.stopPropagation();
+        deleteComment(c.id);
+      };
+
+      commentDiv.appendChild(editBtn);
+      commentDiv.appendChild(deleteBtn);
+      commentListContainer.appendChild(commentDiv);
+    });
+  }
+}
+
+// -------------------
+// Floating UI & Voice
+// -------------------
+function removeFloatingUI() {
+  if (floatingUI) {
+    document.removeEventListener("click", outsideClickHandler);
+    document.removeEventListener("touchstart", outsideClickHandler); // Remove touchstart listener
+    if (cleanupFloatingUI) {
+      cleanupFloatingUI(); // Stop autoUpdate
+      cleanupFloatingUI = null;
+    }
+    // Instead of removing, hide and clear content for reuse
+    floatingUI.style.display = "none";
+    const textarea = floatingUI.querySelector("textarea");
+    if (textarea) textarea.value = "";
+    // Optionally, reset its position or other dynamic styles if needed
+    floatingUI.style.left = '';
+    floatingUI.style.top = '';
+    floatingUI.style.bottom = '';
+  }
+}
+
+function outsideClickHandler(e) {
+  if (floatingUI && !floatingUI.contains(e.target)) {
+    removeFloatingUI();
+  }
+}
+
+async function showFloatingUI(clientX, clientY, pageX, pageY, targetCommentLayer) {
+  // Create a reference element for Floating UI to position against
+  const referenceElement = {
+    getBoundingClientRect: () => ({
+      width: 0,
+      height: 0,
+      x: clientX,
+      y: clientY,
+      top: clientY,
+      left: clientX,
+      right: clientX,
+      bottom: clientY,
+    }),
+    // Required for Floating UI to work with scroll/resize
+    contextElement: targetCommentLayer,
+  };
+
+  // Reuse existing floatingUI or create a new one
+  if (!floatingUI) {
+    floatingUI = document.createElement("div");
+    floatingUI.className = "floating-ui";
+    document.body.appendChild(floatingUI);
+
+    const textarea = document.createElement("textarea");
+    textarea.id = "comment-textarea"; // Add a unique ID
+    textarea.placeholder = "Your comment...";
+    floatingUI.appendChild(textarea);
+
+    const saveBtn = document.createElement("button");
+    saveBtn.textContent = "Save Comment";
+    saveBtn.onclick = async () => {
+      const commentText = textarea.value.trim();
+      if (commentText) {
+        const pageNumber = parseInt(targetCommentLayer.closest(".page-wrapper").dataset.pageNumber);
+        const rect = targetCommentLayer.getBoundingClientRect();
+        const x = ((pageX - rect.left) / rect.width) * 100;
+        const y = ((pageY - rect.top) / rect.height) * 100;
+
+        const newComment = {
+          pdfKey,
+          pageNumber,
+          x,
+          y,
+          text: commentText,
+          timestamp: new Date().toISOString()
+        };
+        const docRef = await saveComment(newComment); // Save to Firestore
+        if (docRef) { // Ensure docRef is not undefined
+          comments.push({ id: docRef.id, ...newComment }); // Add with ID
+          renderCommentsSidebar();
+          renderCommentsOnPDF(pageNumber, targetCommentLayer.closest(".page-wrapper"));
+          removeFloatingUI();
+        } else {
+          console.error("Failed to save comment, docRef is undefined.");
+          // Optionally, provide user feedback here, e.g., an alert or status message
+        }
+      }
+    };
+    floatingUI.appendChild(saveBtn);
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.onclick = removeFloatingUI;
+    floatingUI.appendChild(cancelBtn);
+
+    // Delay adding the outsideClickHandler to prevent immediate closing on tap
+    setTimeout(() => {
+      document.addEventListener("click", outsideClickHandler);
+      document.addEventListener("touchstart", outsideClickHandler); // Also listen for touchstart for consistency
+    }, 100); // Small delay, e.g., 100ms
+  } else {
+    // Clear previous content if reusing, or just update textarea
+    const textarea = floatingUI.querySelector("textarea");
+    if (textarea) textarea.value = "";
+    // Re-add event listeners with delay if reusing
+    setTimeout(() => {
+      document.addEventListener("click", outsideClickHandler);
+      document.addEventListener("touchstart", outsideClickHandler);
+    }, 100);
+  }
+
+  floatingUI.style.display = "flex"; // Make sure it's visible
+  floatingUI.style.position = "absolute"; // Floating UI will manage position
+
+  // Use Floating UI to position the element
+  const updatePosition = async () => {
+    const { x, y } = await computePosition(referenceElement, floatingUI, {
+      placement: 'top', // Default placement
+      middleware: [
+        offset(10), // 10px offset from the reference element
+        flip(), // Flip to the other side if it overflows
+        shift({ padding: 5 }), // Shift to keep it in view, with 5px padding
+      ],
+    });
+ 
+    Object.assign(floatingUI.style, {
+      left: `${x}px`,
+      top: `${y}px`,
+    });
+  };
+ 
+  cleanupFloatingUI = autoUpdate(referenceElement, floatingUI, updatePosition);
+  updatePosition(); // Initial positioning
+
+  floatingUI.querySelector("textarea").focus();
+
+  // Remove manual positioning adjustments as Floating UI handles this
+  // The adjustFloatingUIPosition for virtual keyboard is still relevant
+
+  currentCommentLayer = targetCommentLayer; // Set the current comment layer
+  lastClickPosition = { x: pageX, y: pageY }; // Store the page coordinates
+
+  // Adjust floating UI position for virtual keyboard
+  adjustFloatingUIPosition();
+}
+// Function to adjust floating UI position based on virtual keyboard
+function adjustFloatingUIPosition() {
+  if (!floatingUI) return;
+
+  const viewportHeight = window.innerHeight;
+  const visualViewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  const keyboardHeight = viewportHeight - visualViewportHeight;
+
+  if (keyboardHeight > 0) {
+    // Keyboard is open, adjust bottom position
+    floatingUI.style.bottom = `${keyboardHeight + 10}px`; // 10px padding from keyboard
+    floatingUI.style.top = 'auto'; // Let bottom control position
+  } else {
+    // Keyboard is closed, revert to original positioning logic (or remove bottom style)
+    floatingUI.style.bottom = 'auto';
+  }
+}
+
+// Listen for visual viewport resize events to detect keyboard
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', adjustFloatingUIPosition);
+}
+
+function handleClick(e) {
+  if (isScrolling) {
+    isScrolling = false; // Reset for next interaction
+    return;
+  }
+  if (e.target.classList.contains("comment-icon")) {
+    // If an existing comment icon is clicked, don't show the floating UI
+    return;
+  }
+  showFloatingUI(e.clientX, e.clientY, e.pageX, e.pageY, e.currentTarget);
+}
+
+function handleTouchStart(e) {
+  isScrolling = false; // Assume not scrolling initially
+  touchStartTime = new Date().getTime();
+  if (longPressTimer) {
+    clearTimeout(longPressTimer);
+  }
+  longPressTimer = setTimeout(() => {
+    isScrolling = true; // Treat long press as a scroll to prevent comment placement
+    handleContextMenu(e); // Trigger context menu for long press
+  }, getLongPressDelay());
+}
+
+function handleTouchMove(e) {
+  // If there's significant movement, it's a scroll.
+  // We can add a small threshold here if needed, but for now, any move is a scroll.
+  isScrolling = true;
+  if (longPressTimer) {
+    clearTimeout(longPressTimer);
+  }
+}
+
+function handleTouchEnd(e) {
+  if (longPressTimer) {
+    clearTimeout(longPressTimer);
+  }
+
+  const touchDuration = new Date().getTime() - touchStartTime;
+  console.log("handleTouchEnd - isScrolling:", isScrolling, "touchDuration:", touchDuration, "getLongPressDelay():", getLongPressDelay());
+
+  // Only show floating UI if it was a short tap and not a scroll/long press
+  if (!isScrolling && touchDuration < getLongPressDelay()) {
+    e.preventDefault(); // Prevent default browser actions like text selection or context menu
+    if (e.target.classList.contains("comment-icon")) {
+      return;
+    }
+    const touch = e.changedTouches[0];
+    showFloatingUI(touch.clientX, touch.clientY, touch.pageX, touch.pageY, e.currentTarget);
+  }
+  // isScrolling is reset at the beginning of handleTouchStart for the next interaction
+}
+
+function handleContextMenu(e) {
+  e.preventDefault(); // Prevent default context menu
+  // You could potentially show a custom context menu here if needed
+  console.log("Context menu / Long press detected.");
+  // For now, just prevent comment placement on long press
+  isScrolling = true;
+}
+
+// -------------------
+// Floating UI & Voice
+// -------------------
+
+
+// -------------------
+// Global Record Button Logic
+// -------------------
+document.addEventListener("DOMContentLoaded", () => {
+  recordToggleBtn = document.getElementById("record-toggle-btn");
+  recordToggleBtn.addEventListener("click", toggleRecording);
+  // Attempt to set up microphone on DOMContentLoaded to get permission early
+  setupMicrophone();
+});
+
+// Stop microphone tracks when the page is unloaded
+window.addEventListener('beforeunload', () => {
+  if (currentStream) {
+    currentStream.getTracks().forEach(track => track.stop());
+    console.log("Microphone tracks stopped on page unload.");
+  }
+});
+
+async function toggleRecording() {
+  if (!transcriber) {
+    updateVoiceStatus("Whisper model not loaded yet.", VOICE_STATUS_CLASSES.ERROR);
+    return;
+  }
+
+  if (!currentCommentLayer) {
+    updateVoiceStatus("Tap on the PDF first to select a comment location.", VOICE_STATUS_CLASSES.ERROR);
+    return;
+  }
+
+  // Ensure microphone stream is available
+  if (!currentStream) {
+    const micReady = await setupMicrophone();
+    if (!micReady) {
+      return;
+    }
+  }
+
+  if (!recording) {
+    // Start recording
+    try {
+      console.log("Starting MediaRecorder with existing stream.");
+      mediaRecorder = new MediaRecorder(currentStream);
+      audioChunks = [];
+      recording = true;
+
+      recordToggleBtn.classList.add("recording");
+      updateVoiceStatus(VOICE_STATUS_MESSAGES.RECORDING, VOICE_STATUS_CLASSES.RECORDING);
+      console.log("MediaRecorder started.");
+
+      mediaRecorder.ondataavailable = e => {
+        audioChunks.push(e.data);
+        console.log(`Audio chunk received, total chunks: ${audioChunks.length}`);
+      };
+      mediaRecorder.onstop = async () => {
+        console.log("MediaRecorder stopped. Processing audio...");
+        recording = false;
+        recordToggleBtn.classList.remove("recording");
+        updateVoiceStatus(VOICE_STATUS_MESSAGES.PROCESSING_AUDIO, VOICE_STATUS_CLASSES.PROCESSING);
+
+        const blob = new Blob(audioChunks, { type: "audio/webm" });
+        console.log("Audio blob created:", blob);
+        const arrayBuffer = await blob.arrayBuffer();
+        console.log("ArrayBuffer from blob:", arrayBuffer);
+        const AC = new AudioContext();
+        console.log("AudioContext created.");
+        const decoded = await AC.decodeAudioData(arrayBuffer);
+        console.log("Audio decoded successfully.");
+        const offline = new OfflineAudioContext(1, decoded.duration * 16000, 16000);
+        console.log("OfflineAudioContext created.");
+        const src = offline.createBufferSource();
+        src.buffer = decoded;
+        src.connect(offline.destination);
+        src.start();
+        console.log("Offline audio rendering started.");
+        const rendered = await offline.startRendering();
+        console.log("Offline audio rendering completed.");
+        const waveform = rendered.getChannelData(0);
+        console.log("Waveform extracted. Starting transcription...");
+        updateVoiceStatus(VOICE_STATUS_MESSAGES.TRANSCRIBING, VOICE_STATUS_CLASSES.TRANSCRIBING);
+        const result = await transcriber(waveform, { chunk_length_s: 15 });
+        console.log("Transcription result:", result);
+        
+        // Create a new floating UI for the transcribed text
+        removeFloatingUI(); // Remove any existing floating UI
+        showFloatingUI(
+          lastClickPosition.x - window.scrollX, // clientX
+          lastClickPosition.y - window.scrollY, // clientY
+          lastClickPosition.x, // pageX
+          lastClickPosition.y, // pageY
+          currentCommentLayer
+        );
+        floatingUI.querySelector("textarea").value = result.text || "[Unclear]";
+        updateVoiceStatus(VOICE_STATUS_MESSAGES.WHISPER_READY, VOICE_STATUS_CLASSES.READY); // Reset status after transcription
+      };
+
+      mediaRecorder.start();
+    } catch (err) {
+      updateVoiceStatus(VOICE_STATUS_MESSAGES.ERROR + err.message, VOICE_STATUS_CLASSES.ERROR); // Display user-friendly error message
+      console.error("Error starting recording or during transcription:", err);
+      recordToggleBtn.classList.remove("recording");
+      recording = false;
+    }
+  } else {
+    // Stop recording
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      console.log("Stopping MediaRecorder.");
+      mediaRecorder.stop();
+      // Do NOT stop currentStream tracks here, as we want to reuse the stream
+      console.log("MediaRecorder stopped.");
+    }
+  }
+}
+
+
+// -------------------
+// Upload PDF from file
+// -------------------
+fileInput.addEventListener("change", async e=>{
+  const file=e.target.files[0]; if(!file) return;
+  const reader = new FileReader();
+  reader.onload = async function(){
+    const typedArray = new Uint8Array(this.result);
+    const hash = await computeMD5(typedArray.buffer); // Pass ArrayBuffer
+    pdfKey = hash; // Use the hash as the unique key
+    comments = []; // Clear existing comments
+    comments = await loadComments(pdfKey);
+    console.log("Comments array after loading:", comments);
+    pdfDoc = await pdfjsLib.getDocument({ data: typedArray, timeout: 30000 }).promise;
+    currentScale = getResponsiveScale(); // Initialize currentScale for responsive viewing
+    if (pdfDoc) { // Ensure pdfDoc is not null before rendering
+      renderPDF();
+    }
+  };
+  reader.readAsArrayBuffer(file);
+});
+
+// -------------------
+// Load demo PDF
+// -------------------
+async function loadDemoPDF(){
+ console.log("Attempting to load demo PDF...");
+ const demoUrl = "https://d18w0now3310fo.cloudfront.net/assets/misc/mahasin+final+2dd+to+send.pdf";
+ try {
+     console.log("Attempting to fetch PDF from URL:", demoUrl);
+     const res = await fetch(demoUrl);
+     if (!res.ok) {
+         throw new Error(`HTTP error! status: ${res.status}`);
+     }
+     console.log("Fetch successful, response status:", res.status);
+     console.log("Converting response to ArrayBuffer...");
+     const data = await res.arrayBuffer();
+     console.log("ArrayBuffer obtained. Computing MD5 hash...");
+     const hash = await computeMD5(data);
+     pdfKey = hash; // Use the hash as the unique key
+     console.log("MD5 hash computed:", pdfKey);
+     console.log("Checking pdfjsLib:", typeof pdfjsLib);
+     console.log("Getting PDF document...");
+     try {
+         // Increased timeout to 60 seconds for potentially large PDFs
+         pdfDoc = await pdfjsLib.getDocument({ data, timeout: 60000 }).promise;
+         console.log("PDF document loaded. Loading comments...");
+     } catch (pdfError) {
+         console.error("Error getting PDF document:", pdfError);
+         alert("Error parsing PDF: " + pdfError.message);
+         return; // Stop execution if PDF parsing fails
+     }
+     console.log("Calling loadComments with pdfKey:", pdfKey);
+     comments = []; // Clear existing comments
+     comments = await loadComments(pdfKey);
+     console.log("Comments array after loading:", comments);
+     console.log("Comments loaded. Value of pdfDoc before rendering:", pdfDoc);
+     currentScale = getResponsiveScale(); // Initialize currentScale for responsive viewing
+     if (pdfDoc) { // Ensure pdfDoc is not null before rendering
+       renderPDF();
+     }
+     console.log("Demo PDF loaded successfully.");
+ } catch (err) {
+     console.error("Error loading demo PDF:", err);
+     alert("Error loading demo PDF: " + err.message);
+ }
+}
+document.getElementById("load-demo-btn").addEventListener("click", loadDemoPDF);
+document.getElementById("switch-pdf-btn").addEventListener("click", ()=>fileInput.click());
+// document.addEventListener("DOMContentLoaded", loadDemoPDF); // Removed to prevent automatic loading on browser launch
+function debounce(func, delay) {
+  let timeout;
+  return function(...args) {
+    const context = this;
+    clearTimeout(timeout);
+    timeout = setTimeout(() => func.apply(context, args), delay);
+  };
+}
+
+let animationFrameId = null;
+
+function scheduleRenderPDF() {
+  if (animationFrameId) {
+    cancelAnimationFrame(animationFrameId);
+  }
+  animationFrameId = requestAnimationFrame(() => {
+    renderPDF();
+    animationFrameId = null;
+  });
+}
+
+const debouncedScheduleRenderPDF = debounce(scheduleRenderPDF, 100); // Debounce by 100ms
+
+window.addEventListener("resize", debounce(() => {
+  if (pdfDoc) { // Only render if a PDF is already loaded
+    debouncedScheduleRenderPDF();
+  }
+}, 250));
+
+// Update zoom controls to use the new scheduling function
+document.getElementById("zoom-in-btn").addEventListener("click", () => {
+  currentScale = Math.min(currentScale + ZOOM_STEP, MAX_SCALE);
+  debouncedScheduleRenderPDF();
+});
+
+document.getElementById("zoom-out-btn").addEventListener("click", () => {
+  currentScale = Math.max(currentScale - ZOOM_STEP, MIN_SCALE);
+  debouncedScheduleRenderPDF();
+});
+
+// Update pinch-to-zoom to use the new scheduling function
+pdfContainer.addEventListener('touchmove', (e) => {
+  if (e.touches.length === 2) {
+    e.preventDefault(); // Prevent default touch behavior like scrolling
+    const currentPinchDistance = Math.hypot(
+      e.touches[0].pageX - e.touches[1].pageX,
+      e.touches[0].pageY - e.touches[1].pageY
+    );
+    const scaleFactor = currentPinchDistance / initialPinchDistance;
+    currentScale = Math.min(Math.max(initialScale * scaleFactor, MIN_SCALE), MAX_SCALE);
+    debouncedScheduleRenderPDF(); // Use debounced version
+  }
+}, { passive: false }); // Use passive: false to allow preventDefault
+
+// -------------------
+// Load PDF from URL
+// -------------------
+document.getElementById('loadUrlBtn').addEventListener('click', async () => {
+    const urlInput = document.getElementById('pdfUrlInput');
+    const url = urlInput.value.trim();
+    if (!url) return alert("Please enter a valid PDF URL.");
+
+    try {
+        const res = await fetch(url);
+        const data = await res.arrayBuffer();
+        const hash = await computeMD5(data);
+        pdfKey = hash; // Use the hash as the unique key
+        comments = []; // Clear existing comments
+        console.log("Calling loadComments with pdfKey:", pdfKey);
+        pdfDoc = await pdfjsLib.getDocument({ data, timeout: 30000 }).promise;
+        comments = await loadComments(pdfKey);
+        console.log("Comments array after loading:", comments);
+        currentScale = getResponsiveScale(); // Initialize currentScale for responsive viewing
+        if (pdfDoc) { // Ensure pdfDoc is not null before rendering
+          renderPDF();
+        }
+
+        // ✅ Clear the input field after successful load
+        urlInput.value = "";
+    } catch (err) {
+        alert("Error loading PDF: " + err.message);
+    }
+});
+
+
+// -------------------
+// Reset comments
+// -------------------
+resetBtn.addEventListener("click", async ()=>{
+  if(!pdfKey) return;
+  if(confirm("Delete all comments for this PDF?")){
+    await deleteAllCommentsByPdfKey(pdfKey);
+    comments=[];
+    renderCommentsSidebar();
+    document.querySelectorAll(".comment-icon").forEach(e=>e.remove());
+  }
+});
+
+toggleDrawerBtn.addEventListener("click", toggleCommentsDrawer);
+closeDrawerBtn.addEventListener("click", toggleCommentsDrawer);
+
+// -------------------
+// CSV Download Logic
+// -------------------
+function escapeCsv(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  let stringValue = String(value);
+  if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
+    return '"' + stringValue.replace(/"/g, '""') + '"';
+  }
+  return stringValue;
+}
+
+function generateCsvContent() {
+  const headers = ["Page Number", "Content"];
+  let csvRows = [headers.map(escapeCsv).join(',')];
+
+  // Sort comments by page number
+  const sortedComments = [...comments].sort((a, b) => a.pageNumber - b.pageNumber);
+
+  sortedComments.forEach(comment => {
+    const row = [
+      escapeCsv(comment.pageNumber),
+      escapeCsv(comment.text)
+    ];
+    csvRows.push(row.join(','));
+  });
+  return csvRows.join('\n');
+}
+
+function downloadCsv() {
+  if (comments.length === 0) {
+    alert("No comments to download.");
+    return;
+  }
+  const csvContent = generateCsvContent();
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = 'comments_pagewise.csv';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
+downloadCsvBtn.addEventListener("click", downloadCsv);
+
+// -------------------
+// Zoom Controls
+// -------------------
+document.getElementById("zoom-in-btn").addEventListener("click", () => {
+  currentScale = Math.min(currentScale + ZOOM_STEP, MAX_SCALE);
+  debouncedScheduleRenderPDF();
+});
+
+document.getElementById("zoom-out-btn").addEventListener("click", () => {
+  currentScale = Math.max(currentScale - ZOOM_STEP, MIN_SCALE);
+  debouncedScheduleRenderPDF();
+});
+
+// -------------------
+// Pinch-to-zoom (Touch Gestures)
+// -------------------
+pdfContainer.addEventListener('touchstart', (e) => {
+  if (e.touches.length === 2) {
+    e.preventDefault(); // Prevent default touch behavior like scrolling
+    initialPinchDistance = Math.hypot(
+      e.touches[0].pageX - e.touches[1].pageX,
+      e.touches[0].pageY - e.touches[1].pageY
+    );
+    initialScale = currentScale;
+  }
+}, { passive: false }); // Use passive: false to allow preventDefault
+
+pdfContainer.addEventListener('touchmove', (e) => {
+  if (e.touches.length === 2) {
+    e.preventDefault(); // Prevent default touch behavior like scrolling
+    const currentPinchDistance = Math.hypot(
+      e.touches[0].pageX - e.touches[1].pageX,
+      e.touches[0].pageY - e.touches[1].pageY
+    );
+    const scaleFactor = currentPinchDistance / initialPinchDistance;
+    currentScale = Math.min(Math.max(initialScale * scaleFactor, MIN_SCALE), MAX_SCALE);
+    debouncedRenderPDF(); // Use debounced version
+  }
+}, { passive: false }); // Use passive: false to allow preventDefault
+commentListContainer.addEventListener("click", (e) => {
+  const target = e.target;
+  // Check if the clicked element is a comment text, edit button, or delete button
+  if (target.classList.contains("comment-text") || target.classList.contains("edit-comment-btn") || target.classList.contains("delete-comment-btn")) {
+    const commentDiv = target.closest(".comment-item");
+    const commentId = commentDiv.dataset.commentId;
+    const selectedComment = comments.find(c => c.id === commentId);
+
+    if (selectedComment) {
+      const pageWrapper = document.querySelector(`.page-wrapper[data-page-number="${selectedComment.pageNumber}"]`);
+      if (pageWrapper) {
+        pageWrapper.scrollIntoView({ behavior: "smooth", block: "center" });
+        const commentIcons = pageWrapper.querySelectorAll(".comment-icon");
+        commentIcons.forEach(icon => {
+          const iconX = parseFloat(icon.style.left);
+          const iconY = parseFloat(icon.style.top);
+          if (Math.abs(iconX - selectedComment.x) < 1 && Math.abs(iconY - selectedComment.y) < 1) {
+            icon.style.outline = "2px solid #007bff";
+            setTimeout(() => icon.style.outline = "none", 3000);
+          }
+        });
+      }
+      // Only close the drawer if a comment text was clicked, not an edit/delete button
+      if (target.classList.contains("comment-text")) {
+        toggleCommentsDrawer();
+      }
+    }
+  }
+});
+
+function adjustCommentDropdownHeight() {
+  const commentsDrawer = document.getElementById("comments-drawer");
+  const drawerHeader = commentsDrawer.querySelector(".drawer-header");
+  const drawerContent = commentsDrawer.querySelector(".drawer-content");
+  const commentListContainer = document.getElementById("comment-list-container");
+
+  if (commentsDrawer && drawerHeader && drawerContent && commentListContainer) {
+    const drawerHeaderHeight = drawerHeader.offsetHeight;
+    const drawerContentPadding = parseFloat(window.getComputedStyle(drawerContent).paddingTop) + parseFloat(window.getComputedStyle(drawerContent).paddingBottom);
+    const otherElementsHeight =
+      document.getElementById("reset-btn").offsetHeight +
+      parseFloat(window.getComputedStyle(document.getElementById("reset-btn")).marginBottom) +
+      document.getElementById("download-csv-btn").offsetHeight +
+      parseFloat(window.getComputedStyle(document.getElementById("download-csv-btn")).marginBottom);
+
+    const availableHeight = commentsDrawer.offsetHeight - drawerHeaderHeight - drawerContentPadding - otherElementsHeight;
+    commentListContainer.style.height = `${availableHeight}px`;
+  }
+}
+
+// Adjust height on load and resize
+document.addEventListener("DOMContentLoaded", adjustCommentDropdownHeight);
+window.addEventListener("resize", debounce(adjustCommentDropdownHeight, 250));
+
+</script>
+
+<div id="record-button-container">
+  <button id="record-toggle-btn" class="record-button">
+    <span class="record-icon"></span>
+  </button>
+</div>
+
+
+</body>
+</html>
