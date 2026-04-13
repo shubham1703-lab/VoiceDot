@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mobile PDF Voice Commenter</title>
+<title>VoiceDot — Direct Voice-to-PDF Comments</title>
 <script>
   // Define a global process object to prevent ReferenceError in Floating UI
   // This is a common workaround for modules that expect Node.js 'process' in a browser environment.
@@ -27,7 +27,8 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<h1>ECHO-NOTE</h1>
+<h1>VOICE-DOT</h1>
+  <p id="tagline">Tap. Speak. Annotate.</p>
 <div id="voiceStatus" style="text-align: center; margin-top: 10px; font-weight: bold;"></div>
 
 <div class="pdf-controls">
@@ -903,7 +904,7 @@ fileInput.addEventListener("change", async e=>{
 // -------------------
 async function loadDemoPDF(){
  console.log("Attempting to load demo PDF...");
- const demoUrl = "https://d18w0now3310fo.cloudfront.net/assets/misc/mahasin+final+2dd+to+send.pdf";
+ const demoUrl = "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf";
  try {
      console.log("Attempting to fetch PDF from URL:", demoUrl);
      const res = await fetch(demoUrl);
